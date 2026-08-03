@@ -16,6 +16,37 @@ const pool = new Pool({
   max: 30,
 });
 
+// Canonical display order for product types, mirrored from ORDERED_TYPES in
+// List.jsx / Pricelist.jsx. Kept here too so any client hitting
+// GET /api/product-types directly (not just the two known frontends) still
+// receives categories in the intended order, instead of relying on every
+// consumer to re-implement the sort.
+const ORDERED_TYPES = [
+  "One sound crackers", "One Sound Crackers Premium", "Chorsa and Gaints", "Delux Crackers",
+  "Bijili Crackers", "Bombs", "Paper Bombs", "Twinkling Star", "Rockets",
+  "Kids Special", "Matches", "Flower Pots", "Colour Fountain Mini", "Colour Fountain Mega", "Crackling Fountain",
+  "Ground Chakkars", "New Arrivals", "Vip Special Crackers",
+  "Sparklers", "Premium Sparklers", "Sky Shot Mini", "Sky Shot Single", "Grand Sky Shot", "Fun And Crazy Sky Shot",
+  "Repeating Shots", "Multi Shots", "Comets Sky Shots", "Premium Set Out", "Fancy pencil",
+  "Fountain and Fancy Novelties", "Guns and Caps", "Gift Boxes",
+];
+
+// Sorts a list of { product_type } rows (product_type stored as
+// "one_sound_crackers" style keys) to match ORDERED_TYPES. Anything not
+// present in ORDERED_TYPES is appended alphabetically at the end so newly
+// created product types are never silently dropped from the response.
+function arrangeProductTypeRows(rows) {
+  const orderRank = new Map(
+    ORDERED_TYPES.map((t, i) => [t.replace(/\s+/g, "_").toLowerCase(), i])
+  );
+  return [...rows].sort((a, b) => {
+    const rankA = orderRank.has(a.product_type) ? orderRank.get(a.product_type) : Infinity;
+    const rankB = orderRank.has(b.product_type) ? orderRank.get(b.product_type) : Infinity;
+    if (rankA !== rankB) return rankA - rankB;
+    return a.product_type.localeCompare(b.product_type);
+  });
+}
+
 let productTypeCache = {
   data: null,
   timestamp: 0,
@@ -420,7 +451,7 @@ exports.addProductType = async (req, res) => {
 exports.getProductTypes = async (req, res) => {
   try {
     const result = await pool.query("SELECT product_type FROM public.products");
-    res.status(200).json(result.rows);
+    res.status(200).json(arrangeProductTypeRows(result.rows));
   } catch (err) {
     console.error("Error in getProductTypes:", err);
     res.status(500).json({ message: "Failed to fetch product types", error: err.message });

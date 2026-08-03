@@ -30,12 +30,12 @@ const generatePDF = (type, data, customerDetails, products, dbValues, options = 
         accent: '#1D4ED8',
         footerText: 'Thank you for your business with Phoenix Crackers, Sivakasi'
       } : {
-        companyName: 'Sree Palaniyappa Crackers',
+        companyName: 'Sri Palaniyappa Crackers',
         tagline: '',
-        contact: 'www.palaniyappacrackers.com   |   +91 81242 59430   |   sreepalaniyappacrackers@gmail.com',
+        contact: 'www.sripalaniyappacrackers.com   |   +91 81242 59430   |   sreepalaniyappacrackers@gmail.com',
         address: 'Vaanakkar street, Salem, Tamil Nadu',
         accent: '#EA580C',
-        footerText: 'Thank you for your business with Sree Palaniyappa Crackers, Sivakasi'
+        footerText: 'Thank you for your business with Sri Palaniyappa Crackers, Sivakasi'
       };
 
       const C = {
