@@ -396,6 +396,12 @@ exports.deleteBooking = async (req, res) => {
 
     const { quotation_id, pdf } = bookingCheck.rows[0];
 
+    // Delete transport details first to satisfy foreign key constraint
+    await client.query(
+      'DELETE FROM public.transport_details WHERE order_id = $1',
+      [order_id]
+    );
+
     // Delete the booking
     await client.query(
       'DELETE FROM public.bookings WHERE order_id = $1',
@@ -442,11 +448,12 @@ exports.deleteBooking = async (req, res) => {
     res.status(200).json({ message: 'Booking and associated quotation deleted successfully', order_id });
   } catch (err) {
     if (client) {
-      await client.query('ROLLBACK');
-      client.release();
+      try { await client.query('ROLLBACK'); } catch (_) {}
     }
     console.error(`Failed to delete booking for order_id ${req.params.order_id}: ${err.message}`);
-    res.status(500).json({ message: 'Failed to delete booking', error: err.message, order_id: req.params.order_id });
+    if (!res.headersSent) {
+      res.status(500).json({ message: 'Failed to delete booking', error: err.message, order_id: req.params.order_id });
+    }
   } finally {
     if (client) client.release();
   }

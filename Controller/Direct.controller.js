@@ -3,6 +3,20 @@ const path = require('path');
 const { Pool } = require('pg');
 const PDFDocument = require('pdfkit');
 const XLSX = require('xlsx');
+const nodemailer = require('nodemailer');
+
+const transporter = nodemailer.createTransport({
+  host: 'smtp.gmail.com',
+  port: 465,
+  secure: true,
+  auth: {
+    user: (process.env.EMAIL_USER || '').trim(),
+    pass: (process.env.EMAIL_PASS || '').replace(/\s+/g, ''),
+  },
+  tls: {
+    rejectUnauthorized: false,
+  },
+});
 
 const pool = new Pool({
   user: process.env.PGUSER,
@@ -991,10 +1005,195 @@ exports.createBooking = async (req, res) => {
       }
 
       await client.query('COMMIT');
+      client.release();
+      client = null;
+
       res.status(200).json({
         message: 'Booking created successfully',
         order_id: result.rows[0].order_id,
         pdf_path: pdfPath
+      });
+
+      // Background email notification to admin via Nodemailer
+      setImmediate(async () => {
+        try {
+          const adminEmail = (process.env.EMAIL_USER || '').trim();
+          const emailPass = (process.env.EMAIL_PASS || '').replace(/\s+/g, '');
+
+          if (!adminEmail || !emailPass) {
+            console.warn(`[EMAIL] Skipping email for order ${order_id}: EMAIL_USER or EMAIL_PASS not configured in .env`);
+            return;
+          }
+
+          console.log(`[EMAIL] Preparing admin notification for order ${order_id} to ${adminEmail}`);
+
+          const productRows = (enhancedProducts || []).map((p, i) => {
+            const price = parseFloat(p.price) || 0;
+            const disc = parseFloat(p.discount) || 0;
+            const discRate = price - (price * disc / 100);
+            const lineTotal = discRate * (p.quantity || 1);
+            return `
+              <tr style="background:${i % 2 === 0 ? '#f8fafc' : 'white'};">
+                <td style="padding:8px 10px;border:1px solid #e2e8f0;text-align:center;font-size:12px;">${i + 1}</td>
+                <td style="padding:8px 10px;border:1px solid #e2e8f0;font-size:13px;font-weight:600;color:#0f172a;">${p.productname || 'N/A'}</td>
+                <td style="padding:8px 10px;border:1px solid #e2e8f0;text-align:center;font-size:12px;">${p.quantity || 1} ${p.per || 'Unit'}</td>
+                <td style="padding:8px 10px;border:1px solid #e2e8f0;text-align:right;font-size:12px;">Rs. ${discRate.toFixed(2)}</td>
+                <td style="padding:8px 10px;border:1px solid #e2e8f0;text-align:right;font-weight:700;color:#0f172a;font-size:13px;">Rs. ${lineTotal.toFixed(2)}</td>
+              </tr>`;
+          }).join('');
+
+          const productListText = (enhancedProducts || [])
+            .map((p, i) => `  ${i + 1}. ${p.productname} x${p.quantity} @ Rs. ${parseFloat(p.price).toFixed(2)}`)
+            .join('\n');
+
+          const attachments = [];
+          if (pdfPath && fs.existsSync(pdfPath)) {
+            attachments.push({
+              filename: path.basename(pdfPath),
+              path: pdfPath,
+            });
+          }
+
+          const mailOptions = {
+            from: `"Sri Palaniyappa Crackers" <${adminEmail}>`,
+            to: adminEmail,
+            replyTo: customerDetails.email ? customerDetails.email : undefined,
+            subject: `🔔 New Order Received #${order_id} - Rs. ${parsedTotal.toFixed(2)}`,
+            text: [
+              `New order received on Sri Palaniyappa Crackers!`,
+              ``,
+              `Order ID     : ${order_id}`,
+              `Customer     : ${customerDetails.customer_name || 'N/A'}`,
+              `Mobile       : ${customerDetails.mobile_number || 'N/A'}`,
+              `Email        : ${customerDetails.email || 'N/A'}`,
+              `Address      : ${customerDetails.address || 'N/A'}`,
+              `Location     : ${customerDetails.district || 'N/A'}, ${customerDetails.state || 'N/A'}`,
+              `Customer Type: ${finalCustomerType}`,
+              `Total MRP    : Rs. ${parsedNetRate.toFixed(2)}`,
+              `You Save     : Rs. ${parsedYouSave.toFixed(2)}`,
+              `Grand Total  : Rs. ${parsedTotal.toFixed(2)}`,
+              `Date         : ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`,
+              ``,
+              `Products (${(enhancedProducts || []).length} items):`,
+              productListText,
+            ].join('\n'),
+            html: `
+              <div style="font-family:Arial,Helvetica,sans-serif;max-width:650px;margin:0 auto;color:#1e293b;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;background:#ffffff;">
+                <div style="background:linear-gradient(135deg, #EA580C, #C2410C);padding:22px 26px;color:#ffffff;">
+                  <h1 style="margin:0;font-size:22px;font-weight:700;letter-spacing:-0.02em;">🎉 New Order Received!</h1>
+                  <p style="margin:6px 0 0;font-size:13px;opacity:0.92;">Sri Palaniyappa Crackers • Online Order Notification</p>
+                </div>
+                
+                <div style="padding:24px 26px;">
+                  <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:14px 18px;margin-bottom:22px;">
+                    <table style="width:100%;">
+                      <tr>
+                        <td>
+                          <span style="font-size:12px;text-transform:uppercase;letter-spacing:0.05em;color:#9a3412;font-weight:700;display:block;">Order ID</span>
+                          <strong style="font-size:18px;color:#EA580C;font-family:monospace;">${order_id}</strong>
+                        </td>
+                        <td style="text-align:right;">
+                          <span style="font-size:12px;text-transform:uppercase;letter-spacing:0.05em;color:#9a3412;font-weight:700;display:block;">Grand Total</span>
+                          <strong style="font-size:20px;color:#15803d;">Rs. ${parsedTotal.toFixed(2)}</strong>
+                        </td>
+                      </tr>
+                    </table>
+                  </div>
+
+                  <h3 style="font-size:15px;color:#0f172a;margin:0 0 10px;text-transform:uppercase;letter-spacing:0.05em;">Customer Details</h3>
+                  <table style="width:100%;border-collapse:collapse;margin-bottom:24px;font-size:13px;">
+                    <tr style="background:#f8fafc;">
+                      <td style="padding:9px 12px;font-weight:600;width:35%;border:1px solid #e2e8f0;color:#475569;">Customer Name</td>
+                      <td style="padding:9px 12px;border:1px solid #e2e8f0;font-weight:600;color:#0f172a;">${customerDetails.customer_name || 'N/A'}</td>
+                    </tr>
+                    <tr>
+                      <td style="padding:9px 12px;font-weight:600;border:1px solid #e2e8f0;color:#475569;">Mobile Number</td>
+                      <td style="padding:9px 12px;border:1px solid #e2e8f0;color:#0f172a;">
+                        <a href="tel:${customerDetails.mobile_number}" style="color:#EA580C;text-decoration:none;font-weight:600;">${customerDetails.mobile_number || 'N/A'}</a>
+                      </td>
+                    </tr>
+                    <tr style="background:#f8fafc;">
+                      <td style="padding:9px 12px;font-weight:600;border:1px solid #e2e8f0;color:#475569;">Email Address</td>
+                      <td style="padding:9px 12px;border:1px solid #e2e8f0;color:#0f172a;">${customerDetails.email || 'N/A'}</td>
+                    </tr>
+                    <tr>
+                      <td style="padding:9px 12px;font-weight:600;border:1px solid #e2e8f0;color:#475569;">Delivery Address</td>
+                      <td style="padding:9px 12px;border:1px solid #e2e8f0;color:#0f172a;">${customerDetails.address || 'N/A'}</td>
+                    </tr>
+                    <tr style="background:#f8fafc;">
+                      <td style="padding:9px 12px;font-weight:600;border:1px solid #e2e8f0;color:#475569;">District & State</td>
+                      <td style="padding:9px 12px;border:1px solid #e2e8f0;color:#0f172a;">${customerDetails.district || 'N/A'}, ${customerDetails.state || 'N/A'}</td>
+                    </tr>
+                    <tr>
+                      <td style="padding:9px 12px;font-weight:600;border:1px solid #e2e8f0;color:#475569;">Customer Type</td>
+                      <td style="padding:9px 12px;border:1px solid #e2e8f0;color:#0f172a;">${finalCustomerType}</td>
+                    </tr>
+                    <tr style="background:#f8fafc;">
+                      <td style="padding:9px 12px;font-weight:600;border:1px solid #e2e8f0;color:#475569;">Order Date & Time</td>
+                      <td style="padding:9px 12px;border:1px solid #e2e8f0;color:#0f172a;">${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</td>
+                    </tr>
+                  </table>
+
+                  <h3 style="font-size:15px;color:#0f172a;margin:0 0 10px;text-transform:uppercase;letter-spacing:0.05em;">Order Summary</h3>
+                  <table style="width:100%;border-collapse:collapse;margin-bottom:24px;font-size:13px;">
+                    <tr style="background:#f8fafc;">
+                      <td style="padding:8px 12px;border:1px solid #e2e8f0;color:#475569;">Total MRP Rate</td>
+                      <td style="padding:8px 12px;border:1px solid #e2e8f0;text-align:right;color:#0f172a;">Rs. ${parsedNetRate.toFixed(2)}</td>
+                    </tr>
+                    <tr>
+                      <td style="padding:8px 12px;border:1px solid #e2e8f0;color:#475569;">Discount Savings</td>
+                      <td style="padding:8px 12px;border:1px solid #e2e8f0;text-align:right;color:#15803d;font-weight:600;">- Rs. ${parsedYouSave.toFixed(2)}</td>
+                    </tr>
+                    ${parsedPromoDiscount > 0 ? `
+                    <tr style="background:#f8fafc;">
+                      <td style="padding:8px 12px;border:1px solid #e2e8f0;color:#475569;">Promo Discount</td>
+                      <td style="padding:8px 12px;border:1px solid #e2e8f0;text-align:right;color:#15803d;font-weight:600;">- Rs. ${parsedPromoDiscount.toFixed(2)}</td>
+                    </tr>` : ''}
+                    <tr style="background:#fff7ed;font-weight:bold;">
+                      <td style="padding:10px 12px;border:1px solid #fed7aa;color:#9a3412;font-size:14px;">Net Payable Amount</td>
+                      <td style="padding:10px 12px;border:1px solid #fed7aa;text-align:right;color:#EA580C;font-size:16px;">Rs. ${parsedTotal.toFixed(2)}</td>
+                    </tr>
+                  </table>
+
+                  <h3 style="font-size:15px;color:#0f172a;margin:0 0 10px;text-transform:uppercase;letter-spacing:0.05em;">Ordered Products (${(enhancedProducts || []).length} items)</h3>
+                  <table style="width:100%;border-collapse:collapse;margin-bottom:20px;">
+                    <thead>
+                      <tr style="background:#f1f5f9;color:#334155;font-size:12px;">
+                        <th style="padding:8px;border:1px solid #e2e8f0;text-align:center;width:35px;">#</th>
+                        <th style="padding:8px;border:1px solid #e2e8f0;text-align:left;">Product Name</th>
+                        <th style="padding:8px;border:1px solid #e2e8f0;text-align:center;width:60px;">Qty</th>
+                        <th style="padding:8px;border:1px solid #e2e8f0;text-align:right;width:80px;">Rate</th>
+                        <th style="padding:8px;border:1px solid #e2e8f0;text-align:right;width:85px;">Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${productRows}
+                    </tbody>
+                  </table>
+
+                  ${attachments.length > 0 ? `
+                  <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;padding:10px 14px;color:#166534;font-size:13px;margin-bottom:20px;">
+                    📎 <strong>Attached Invoice:</strong> Invoice PDF (<code>${path.basename(pdfPath)}</code>) is attached to this email.
+                  </div>` : ''}
+
+                  <div style="border-top:1px solid #e2e8f0;padding-top:16px;text-align:center;color:#94a3b8;font-size:12px;">
+                    <p style="margin:0 0 4px;">Automated notification from <strong>Sri Palaniyappa Crackers</strong></p>
+                    <p style="margin:0;">Vaanakkar street, Salem, Tamil Nadu • <a href="https://www.sripalaniyappacrackers.com" style="color:#EA580C;text-decoration:none;">www.sripalaniyappacrackers.com</a></p>
+                  </div>
+                </div>
+              </div>
+            `,
+            attachments,
+          };
+
+          const info = await transporter.sendMail(mailOptions);
+          console.log(`[EMAIL] SUCCESS for order ${order_id} - MessageId: ${info.messageId}`);
+          console.log(`[EMAIL] Accepted: ${JSON.stringify(info.accepted)}`);
+        } catch (emailErr) {
+          console.error(`[EMAIL] FAILED for order ${order_id}: ${emailErr.message}`);
+          if (emailErr.code) console.error(`[EMAIL] Code: ${emailErr.code}`);
+          if (emailErr.response) console.error(`[EMAIL] SMTP: ${emailErr.response}`);
+        }
       });
     } catch (dbError) {
       await client.query('ROLLBACK');

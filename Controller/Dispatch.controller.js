@@ -269,6 +269,9 @@ exports.deleteBooking = async (req, res) => {
       return res.status(400).json({ message: 'Invalid or missing Order ID' });
     }
 
+    // Delete transport details first to satisfy foreign key constraint
+    await pool.query('DELETE FROM public.transport_details WHERE order_id = $1', [order_id]);
+
     const result = await pool.query(
       'DELETE FROM public.bookings WHERE order_id = $1 RETURNING id, order_id',
       [order_id]
@@ -281,6 +284,8 @@ exports.deleteBooking = async (req, res) => {
     res.status(200).json({ message: 'Booking deleted successfully', order_id });
   } catch (err) {
     console.error('Error deleting booking:', err);
-    res.status(500).json({ message: 'Failed to delete booking' });
+    if (!res.headersSent) {
+      res.status(500).json({ message: 'Failed to delete booking', error: err.message });
+    }
   }
 };
