@@ -24,15 +24,14 @@ const createTransportTable = `
   )
 `;
 
-// const alterBookingsTable = `
-//   ALTER TABLE bookings
-//   ADD COLUMN IF NOT EXISTS payment_method VARCHAR(20),
-//   ADD COLUMN IF NOT EXISTS transaction_id VARCHAR(100),
-//   ADD COLUMN IF NOT EXISTS amount_paid NUMERIC
-// `;
+const alterBookingsTable = `
+  ALTER TABLE public.bookings
+  ADD COLUMN IF NOT EXISTS contacted BOOLEAN DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS contacted_note TEXT,
+  ADD COLUMN IF NOT EXISTS contacted_at TIMESTAMP;
+`;
 
-// pool.query(createTransportTable).catch((err) => console.error('Error creating transport table:', err));
-// pool.query(alterBookingsTable).catch((err) => console.error('Error altering bookings table:', err));
+pool.query(alterBookingsTable).catch((err) => console.error('Error altering bookings table for contact columns:', err));
 
 async function sendStatusUpdate(mobileNumber, status, transportDetails = null) {
   if (!mobileNumber) {
@@ -459,4 +458,33 @@ exports.deleteBooking = async (req, res) => {
   }
 };
 
-module.exports;
+exports.updateContacted = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { contacted, contacted_note } = req.body;
+
+    const isContacted = contacted === true || contacted === 'true';
+
+    const query = `
+      UPDATE public.bookings
+      SET contacted = $1,
+          contacted_note = $2,
+          contacted_at = CASE WHEN $1 = true THEN COALESCE(contacted_at, NOW()) ELSE NULL END
+      WHERE id = $3
+      RETURNING id, order_id, contacted, contacted_note, contacted_at
+    `;
+    const result = await pool.query(query, [isContacted, contacted_note || null, id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'Booking not found' });
+    }
+
+    res.status(200).json({
+      message: 'Contact status updated successfully',
+      data: result.rows[0]
+    });
+  } catch (err) {
+    console.error('Error updating contacted status:', err);
+    res.status(500).json({ message: 'Failed to update contact status', error: err.message });
+  }
+};

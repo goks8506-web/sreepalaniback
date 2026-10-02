@@ -4,6 +4,7 @@ const trackingController = require('../Controller/Tracking.controller');
 
 router.get('/bookings', trackingController.getAllBookings);
 router.put('/bookings/:id/status', trackingController.updateBookingStatus);
+router.put('/bookings/:id/contacted', trackingController.updateContacted);
 router.get('/filtered-bookings', trackingController.getFilteredBookings);
 router.get('/report-bookings', trackingController.getreportBookings);
 router.put('/fbookings/:id/status', trackingController.updateFilterBookingStatus);
