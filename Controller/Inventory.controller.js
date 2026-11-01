@@ -262,9 +262,13 @@ exports.updateProduct = async (req, res) => {
       for (const url of imagesToDelete) {
         const publicId = url.match(/\/mnc_products\/(.+?)\./)?.[1];
         if (publicId) {
-          await cloudinary.uploader.destroy(`mnc_products/${publicId}`, {
-            resource_type: url.includes("/video/") ? "video" : "image",
-          });
+          try {
+            await cloudinary.uploader.destroy(`mnc_products/${publicId}`, {
+              resource_type: url.includes("/video/") ? "video" : "image",
+            });
+          } catch (e) {
+            console.warn(`Could not delete Cloudinary image: ${publicId}`, e.message);
+          }
         }
       }
     }
@@ -343,9 +347,9 @@ exports.getProducts = async (req, res) => {
 
         const selectExtras = [
           cols.includes("fast_running") ? "fast_running" : "false AS fast_running",
-          cols.includes("brand")        ? "brand"        : "'' AS brand",
-          cols.includes("box_count")    ? "box_count"    : "1 AS box_count",
-          cols.includes("free")         ? "free"         : "false AS free",
+          cols.includes("brand") ? "brand" : "'' AS brand",
+          cols.includes("box_count") ? "box_count" : "1 AS box_count",
+          cols.includes("free") ? "free" : "false AS free",
         ].join(", ");
 
         const result = await client.query(
@@ -474,9 +478,13 @@ exports.deleteProduct = async (req, res) => {
       for (const url of images) {
         const publicId = url.match(/\/mnc_products\/(.+?)\./)?.[1];
         if (publicId) {
-          await cloudinary.uploader.destroy(`mnc_products/${publicId}`, {
-            resource_type: url.includes("/video/") ? "video" : "image",
-          });
+          try {
+            await cloudinary.uploader.destroy(`mnc_products/${publicId}`, {
+              resource_type: url.includes("/video/") ? "video" : "image",
+            });
+          } catch (e) {
+            console.warn(`Could not delete Cloudinary image: ${publicId}`, e.message);
+          }
         }
       }
     }
@@ -521,9 +529,13 @@ exports.deleteProductType = async (req, res) => {
         for (const url of images) {
           const publicId = url.match(/\/mnc_products\/(.+?)\./)?.[1];
           if (publicId) {
-            await cloudinary.uploader.destroy(`mnc_products/${publicId}`, {
-              resource_type: url.includes("/video/") ? "video" : "image",
-            });
+            try {
+              await cloudinary.uploader.destroy(`mnc_products/${publicId}`, {
+                resource_type: url.includes("/video/") ? "video" : "image",
+              });
+            } catch (e) {
+              console.warn(`Could not delete Cloudinary image: ${publicId}`, e.message);
+            }
           }
         }
       }
@@ -642,6 +654,143 @@ exports.toggleFree = async (req, res) => {
   } catch (err) {
     console.error("Error in toggleFree:", err);
     res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+};
+
+exports.bulkUploadProductImages = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const files = req.files || [];
+    if (!files.length) {
+      return res.status(400).json({ message: "No image files uploaded" });
+    }
+
+    const replaceExisting = req.body.replaceExisting !== "false";
+
+    // Fetch all products across all tables
+    const types = await getCachedProductTypes();
+    const allProducts = [];
+    for (const t of types) {
+      const tableName = t.toLowerCase().replace(/\s+/g, "_");
+      try {
+        const r = await client.query(
+          `SELECT id, serial_number, productname, image FROM public.${tableName}`
+        );
+        r.rows.forEach((p) => {
+          allProducts.push({ ...p, product_type: t, tableName });
+        });
+      } catch (e) {
+        // Table might not exist or empty
+      }
+    }
+
+    const norm = (s) =>
+      (s || "")
+        .toLowerCase()
+        .replace(/[/\\_\-\s]+/g, " ")
+        .trim();
+    const alpha = (s) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
+    const findMatch = (filename) => {
+      const nameWithoutExt = filename.replace(/\.[^/.]+$/, "").trim();
+      const baseName = nameWithoutExt
+        .replace(/(_img\d+|_image\d+|_\d+|\s*\(\d+\))$/i, "")
+        .trim();
+      const targetNorm = norm(baseName);
+      const targetAlpha = alpha(baseName);
+
+      // 1. Exact normalized name
+      let m = allProducts.find((p) => norm(p.productname) === targetNorm);
+      if (m) return m;
+
+      // 2. Alphanumeric name
+      m = allProducts.find((p) => alpha(p.productname) === targetAlpha);
+      if (m) return m;
+
+      // 3. Serial number exact
+      m = allProducts.find((p) => p.serial_number && norm(p.serial_number) === targetNorm);
+      if (m) return m;
+
+      // 4. Combined serial + name
+      m = allProducts.find(
+        (p) =>
+          targetNorm === norm(`${p.serial_number} ${p.productname}`) ||
+          targetNorm === norm(`${p.serial_number}_${p.productname}`) ||
+          targetAlpha === alpha(`${p.serial_number}${p.productname}`)
+      );
+      if (m) return m;
+
+      // 5. Starts with serial
+      m = allProducts.find((p) => {
+        if (!p.serial_number) return false;
+        const sNorm = norm(p.serial_number);
+        if (targetNorm.startsWith(sNorm)) {
+          const rest = targetNorm.slice(sNorm.length).trim();
+          return norm(p.productname) === rest || alpha(p.productname) === alpha(rest);
+        }
+        return false;
+      });
+      if (m) return m;
+
+      return null;
+    };
+
+    const matchedGroups = {};
+    const unmatchedFiles = [];
+
+    for (const file of files) {
+      const match = findMatch(file.originalname);
+      if (match) {
+        const key = `${match.tableName}:${match.id}`;
+        if (!matchedGroups[key]) {
+          matchedGroups[key] = {
+            product: match,
+            urls: [],
+          };
+        }
+        matchedGroups[key].urls.push(file.path);
+      } else {
+        unmatchedFiles.push(file.originalname);
+      }
+    }
+
+    const updatedProducts = [];
+    for (const key of Object.keys(matchedGroups)) {
+      const { product, urls } = matchedGroups[key];
+      let finalUrls = urls;
+      if (!replaceExisting && product.image) {
+        try {
+          const prev = JSON.parse(product.image) || [];
+          finalUrls = [...prev, ...urls];
+        } catch {
+          finalUrls = urls;
+        }
+      }
+
+      await client.query(
+        `UPDATE public.${product.tableName} SET image = $1 WHERE id = $2`,
+        [JSON.stringify(finalUrls), product.id]
+      );
+      updatedProducts.push({
+        id: product.id,
+        productname: product.productname,
+        serial_number: product.serial_number,
+        imageCount: finalUrls.length,
+      });
+    }
+
+    res.status(200).json({
+      message: `Successfully updated images for ${updatedProducts.length} products.`,
+      updatedCount: updatedProducts.length,
+      updatedProducts,
+      unmatchedCount: unmatchedFiles.length,
+      unmatchedFiles,
+    });
+  } catch (err) {
+    console.error("Error in bulkUploadProductImages:", err);
+    res.status(500).json({ message: "Bulk upload failed", error: err.message });
   } finally {
     client.release();
   }

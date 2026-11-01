@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const { addProduct, getProducts, addProductType, getProductTypes, updateProduct, deleteProduct, toggleProductStatus, toggleFastRunning, deleteProductType, toggleFree } = require('../Controller/Inventory.controller');
+const { addProduct, getProducts, addProductType, getProductTypes, updateProduct, deleteProduct, toggleProductStatus, toggleFastRunning, deleteProductType, toggleFree, bulkUploadProductImages } = require('../Controller/Inventory.controller');
+const axios = require('axios');
 const { Pool } = require('pg');
 
 const pool = new Pool({
@@ -28,6 +29,21 @@ router.delete('/products/:tableName/:id', deleteProduct);
 router.patch('/products/:tableName/:id/toggle-status', toggleProductStatus);
 router.patch('/products/:tableName/:id/toggle-fast-running', toggleFastRunning);
 router.patch('/products/:tableName/:id/toggle-free', toggleFree);
+router.post('/products/bulk-upload-images', upload.array('images', 200), bulkUploadProductImages);
+
+// Image proxy for downloading product images without CORS issues
+router.get('/proxy-image', async (req, res) => {
+  try {
+    const { url } = req.query;
+    if (!url) return res.status(400).send('URL required');
+    const response = await axios.get(url, { responseType: 'arraybuffer' });
+    const contentType = response.headers['content-type'] || 'image/jpeg';
+    res.set('Content-Type', contentType);
+    res.send(response.data);
+  } catch (err) {
+    res.status(500).send(err.message);
+  }
+});
 
 // Brands CRUD
 router.get('/brands', async (req, res) => {

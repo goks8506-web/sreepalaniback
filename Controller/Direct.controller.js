@@ -1214,18 +1214,19 @@ exports.createBooking = async (req, res) => {
 exports.updateBooking = async (req, res) => {
   try {
     const { order_id } = req.params;
-    const { products, net_rate, you_save, total, promo_discount, additional_discount, status, transport_details } = req.body;
+    const {
+      customer_id, customer_name, customer_type, address, mobile_number, email, district, state,
+      products, net_rate, you_save, total, promo_discount, additional_discount, status, transport_details
+    } = req.body;
 
     if (!order_id || !/^[a-zA-Z0-9-_]+$/.test(order_id))
       return res.status(400).json({ message: 'Invalid or missing Order ID', order_id });
     if (products && (!Array.isArray(products) || products.length === 0))
       return res.status(400).json({ message: 'Products array is required and must not be empty', order_id });
-    if (total && (isNaN(parseFloat(total)) || parseFloat(total) <= 0))
+    if (total !== undefined && (isNaN(parseFloat(total)) || parseFloat(total) <= 0))
       return res.status(400).json({ message: 'Total must be a positive number', order_id });
-    if (status && !['booked', 'paid', 'dispatched', 'canceled'].includes(status))
+    if (status && !['booked', 'paid', 'dispatched', 'delivered', 'canceled'].includes(status))
       return res.status(400).json({ message: 'Invalid status', order_id });
-    if (status === 'dispatched' && !transport_details)
-      return res.status(400).json({ message: 'Transport details required for dispatched status', order_id });
 
     const parsedNetRate = net_rate !== undefined ? roundVal(net_rate) : undefined;
     const parsedYouSave = you_save !== undefined ? roundVal(you_save) : undefined;
@@ -1244,63 +1245,89 @@ exports.updateBooking = async (req, res) => {
       return res.status(404).json({ message: 'Booking not found', order_id });
 
     const booking = bookingCheck.rows[0];
+
+    let finalCustomerType = customer_type || booking.customer_type || 'User';
     let customerDetails = {
-      customer_name: booking.customer_name,
-      address: booking.address,
-      mobile_number: booking.mobile_number,
-      email: booking.email,
-      district: booking.district,
-      state: booking.state
+      customer_name: customer_name || booking.customer_name,
+      address: address || booking.address,
+      mobile_number: mobile_number || booking.mobile_number,
+      email: email !== undefined ? email : booking.email,
+      district: district || booking.district,
+      state: state || booking.state
     };
     let agent_name = null;
 
-    if (booking.customer_id) {
+    const targetCustomerId = customer_id !== undefined ? customer_id : booking.customer_id;
+    if (targetCustomerId) {
       const customerCheck = await pool.query(
-        'SELECT customer_name, address, mobile_number, email, district, state, customer_type, agent_id FROM public.customers WHERE id = $1',
-        [booking.customer_id]
+        'SELECT id, customer_name, address, mobile_number, email, district, state, customer_type, agent_id FROM public.customers WHERE id = $1',
+        [targetCustomerId]
       );
       if (customerCheck.rows.length > 0) {
-        customerDetails = customerCheck.rows[0];
-        if (customerDetails.customer_type === 'Customer of Selected Agent' && customerDetails.agent_id) {
-          const agentCheck = await pool.query('SELECT customer_name FROM public.customers WHERE id = $1', [customerDetails.agent_id]);
+        const customerRow = customerCheck.rows[0];
+        finalCustomerType = customer_type || customerRow.customer_type || 'User';
+        customerDetails = {
+          customer_name: customer_name || customerRow.customer_name,
+          address: address || customerRow.address,
+          mobile_number: mobile_number || customerRow.mobile_number,
+          email: email !== undefined ? email : customerRow.email,
+          district: district || customerRow.district,
+          state: state || customerRow.state
+        };
+        if (finalCustomerType === 'Customer of Selected Agent' && customerRow.agent_id) {
+          const agentCheck = await pool.query('SELECT customer_name FROM public.customers WHERE id = $1', [customerRow.agent_id]);
           if (agentCheck.rows.length > 0) agent_name = agentCheck.rows[0].customer_name;
         }
       }
     }
 
     let enhancedProducts = booking.products;
+    if (typeof enhancedProducts === 'string') {
+      try { enhancedProducts = JSON.parse(enhancedProducts); } catch(e) { enhancedProducts = []; }
+    }
     if (products) {
       enhancedProducts = [];
       for (const product of products) {
-        const { id, product_type, quantity, price, discount } = product;
+        const { id, product_type, quantity, price, discount, productname, per } = product;
         if (!id || !product_type || quantity < 1 || isNaN(parseFloat(price)) || isNaN(parseFloat(discount)))
-          return res.status(400).json({ message: 'Invalid product entry', order_id });
+          return res.status(400).json({ message: 'Invalid product entry (id, product_type, quantity, price, discount required)', order_id });
 
-        const tableName = product_type.toLowerCase().replace(/\s+/g, '_');
-        const productCheck = await pool.query(`SELECT per FROM public.${tableName} WHERE id = $1`, [id]);
-        if (productCheck.rows.length === 0)
-          return res.status(404).json({ message: `Product ${id} of type ${product_type} not found or unavailable`, order_id });
-        const per = productCheck.rows[0].per || '';
-        enhancedProducts.push({ ...product, per });
+        let productPer = per || 'Unit';
+        if (product_type.toLowerCase() !== 'custom') {
+          const tableName = product_type.toLowerCase().replace(/\s+/g, '_');
+          try {
+            const productCheck = await pool.query(`SELECT per FROM public.${tableName} WHERE id = $1`, [id]);
+            if (productCheck.rows.length > 0) {
+              productPer = productCheck.rows[0].per || productPer;
+            }
+          } catch (e) {
+            console.warn(`Could not check table ${tableName}: ${e.message}`);
+          }
+        }
+        enhancedProducts.push({ ...product, per: productPer });
       }
     }
 
     let pdfPath = booking.pdf;
-    if (products || parsedTotal !== undefined) {
-      const pdfResult = await generatePDF(
-        'invoice',
-        { order_id, customer_type: booking.customer_type, total: parsedTotal || roundVal(booking.total), agent_name },
-        customerDetails,
-        enhancedProducts,
-        {
-          net_rate: parsedNetRate !== undefined ? parsedNetRate : roundVal(booking.net_rate),
-          you_save: parsedYouSave !== undefined ? parsedYouSave : roundVal(booking.you_save),
-          total: parsedTotal !== undefined ? parsedTotal : roundVal(booking.total),
-          promo_discount: parsedPromoDiscount !== undefined ? parsedPromoDiscount : roundVal(booking.promo_discount),
-          additional_discount: parsedAdditionalDiscount !== undefined ? parsedAdditionalDiscount : parseFloat(booking.additional_discount || 0)
-        }
-      );
-      pdfPath = pdfResult.pdfPath;
+    if (products || parsedTotal !== undefined || customer_id !== undefined || customer_name || address) {
+      try {
+        const pdfResult = await generatePDF(
+          'invoice',
+          { order_id, customer_type: finalCustomerType, total: parsedTotal !== undefined ? parsedTotal : roundVal(booking.total), agent_name },
+          customerDetails,
+          enhancedProducts,
+          {
+            net_rate: parsedNetRate !== undefined ? parsedNetRate : roundVal(booking.net_rate),
+            you_save: parsedYouSave !== undefined ? parsedYouSave : roundVal(booking.you_save),
+            total: parsedTotal !== undefined ? parsedTotal : roundVal(booking.total),
+            promo_discount: parsedPromoDiscount !== undefined ? parsedPromoDiscount : roundVal(booking.promo_discount),
+            additional_discount: parsedAdditionalDiscount !== undefined ? parsedAdditionalDiscount : parseFloat(booking.additional_discount || 0)
+          }
+        );
+        pdfPath = pdfResult.pdfPath;
+      } catch (pdfError) {
+        console.error(`PDF generation warning on update for order_id ${order_id}: ${pdfError.message}`);
+      }
     }
 
     const updateFields = [];
@@ -1331,6 +1358,38 @@ exports.updateBooking = async (req, res) => {
       updateFields.push(`additional_discount = $${paramIndex++}`);
       updateValues.push(parsedAdditionalDiscount);
     }
+    if (targetCustomerId !== undefined) {
+      updateFields.push(`customer_id = $${paramIndex++}`);
+      updateValues.push(targetCustomerId ? Number(targetCustomerId) : null);
+    }
+    if (customerDetails.customer_name) {
+      updateFields.push(`customer_name = $${paramIndex++}`);
+      updateValues.push(customerDetails.customer_name);
+    }
+    if (customerDetails.address) {
+      updateFields.push(`address = $${paramIndex++}`);
+      updateValues.push(customerDetails.address);
+    }
+    if (customerDetails.mobile_number) {
+      updateFields.push(`mobile_number = $${paramIndex++}`);
+      updateValues.push(customerDetails.mobile_number);
+    }
+    if (customerDetails.email !== undefined) {
+      updateFields.push(`email = $${paramIndex++}`);
+      updateValues.push(customerDetails.email);
+    }
+    if (customerDetails.district) {
+      updateFields.push(`district = $${paramIndex++}`);
+      updateValues.push(customerDetails.district);
+    }
+    if (customerDetails.state) {
+      updateFields.push(`state = $${paramIndex++}`);
+      updateValues.push(customerDetails.state);
+    }
+    if (finalCustomerType) {
+      updateFields.push(`customer_type = $${paramIndex++}`);
+      updateValues.push(finalCustomerType);
+    }
     if (pdfPath) {
       updateFields.push(`pdf = $${paramIndex++}`);
       updateValues.push(pdfPath);
@@ -1353,29 +1412,16 @@ exports.updateBooking = async (req, res) => {
       UPDATE public.bookings
       SET ${updateFields.join(', ')}
       WHERE order_id = $${paramIndex}
-      RETURNING id, order_id, status
+      RETURNING *
     `;
     updateValues.push(order_id);
 
-    await pool.query(query, updateValues);
+    const updateResult = await pool.query(query, updateValues);
 
-    if (!fs.existsSync(pdfPath)) {
-      return res.status(500).json({ message: 'PDF file not found after update', error: 'File system error', order_id });
-    }
-    fs.access(pdfPath, fs.constants.R_OK, (err) => {
-      if (err) {
-        return res.status(500).json({ message: `Cannot read PDF file at ${pdfPath}`, error: err.message, order_id });
-      }
-      const safeCustomerName = (customerDetails.customer_name || 'unknown').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename=${safeCustomerName}-${order_id}-invoice.pdf`);
-      const readStream = fs.createReadStream(pdfPath);
-      readStream.on('error', (streamErr) => {
-        if (!res.headersSent) {
-          res.status(500).json({ message: 'Failed to stream PDF', error: streamErr.message, order_id });
-        }
-      });
-      readStream.pipe(res);
+    res.json({
+      message: 'Booking updated successfully',
+      order_id,
+      booking: updateResult.rows[0]
     });
   } catch (err) {
     console.error(`Failed to update booking for order_id ${req.params.order_id}: ${err.message}`);
