@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { addProduct, getProducts, addProductType, getProductTypes, updateProduct, deleteProduct, toggleProductStatus, toggleFastRunning, deleteProductType, toggleFree, bulkUploadProductImages } = require('../Controller/Inventory.controller');
+const { addProduct, getProducts, addProductType, getProductTypes, updateProduct, deleteProduct, toggleProductStatus, toggleFastRunning, deleteProductType, toggleFree, bulkUploadProductImages, bulkUpdateDiscount } = require('../Controller/Inventory.controller');
 const axios = require('axios');
 const { Pool } = require('pg');
 
@@ -30,6 +30,7 @@ router.patch('/products/:tableName/:id/toggle-status', toggleProductStatus);
 router.patch('/products/:tableName/:id/toggle-fast-running', toggleFastRunning);
 router.patch('/products/:tableName/:id/toggle-free', toggleFree);
 router.post('/products/bulk-upload-images', upload.array('images', 200), bulkUploadProductImages);
+router.patch('/products/bulk-discount', bulkUpdateDiscount);
 
 // Image proxy for downloading product images without CORS issues
 router.get('/proxy-image', async (req, res) => {

@@ -659,6 +659,51 @@ exports.toggleFree = async (req, res) => {
   }
 };
 
+exports.bulkUpdateDiscount = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { discount, product_type } = req.body;
+    const discountNum = parseFloat(discount);
+    if (isNaN(discountNum) || discountNum < 0 || discountNum > 100) {
+      return res.status(400).json({ message: "Discount must be between 0 and 100%" });
+    }
+
+    const types = await getCachedProductTypes();
+    const targetTypes = product_type
+      ? types.filter((t) => t === product_type)
+      : types;
+
+    if (targetTypes.length === 0) {
+      return res.status(404).json({ message: "No matching product types found" });
+    }
+
+    let totalUpdated = 0;
+    for (const t of targetTypes) {
+      const tableName = t.toLowerCase().replace(/\s+/g, "_");
+      try {
+        const result = await client.query(
+          `UPDATE public.${tableName} SET discount = $1`,
+          [discountNum]
+        );
+        totalUpdated += result.rowCount || 0;
+      } catch (e) {
+        console.warn(`Could not update discount for table ${tableName}:`, e.message);
+      }
+    }
+
+    res.status(200).json({
+      message: `Discount updated to ${discountNum}% for ${totalUpdated} products across ${targetTypes.length} category(ies).`,
+      updatedCount: totalUpdated,
+      categoriesAffected: targetTypes.length,
+    });
+  } catch (err) {
+    console.error("Error in bulkUpdateDiscount:", err);
+    res.status(500).json({ message: "Failed to update discounts", error: err.message });
+  } finally {
+    client.release();
+  }
+};
+
 exports.bulkUploadProductImages = async (req, res) => {
   const client = await pool.connect();
   try {
